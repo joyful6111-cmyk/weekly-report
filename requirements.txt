@@ -1,0 +1,4 @@
+openpyxl>=3.1
+windnd>=1.0
+# 실행 파일(.exe) 빌드용 (선택)
+pyinstaller>=6.0

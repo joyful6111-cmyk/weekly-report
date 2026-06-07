@@ -1,0 +1,19 @@
+# 비밀: Claude API 키 (절대 커밋 금지)
+claude_api_key.txt
+
+# 생성 결과물
+경영지원부_주간보고_*.xlsx
+*_AI요약_*.xlsx
+
+# 파이썬/빌드 산출물
+__pycache__/
+*.pyc
+build/
+dist/
+_build/
+*.spec
+
+# 임시/로그
+_err.txt
+*.log
+~$*
