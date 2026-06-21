@@ -1207,25 +1207,41 @@ def resolve_missing_plans(parent, needs):
     boxes = []
     for n in needs:
         row = n['row']
-        title = _strip_markers(row[0]).split('\n')[0]
-        lf = tk.LabelFrame(inner, text=f"  [{n['disp']}]  진행률 {row[1]}  ",
+        lf = tk.LabelFrame(inner, text=f"  [{n['disp']}]  ",
                            font=(FONT_NAME, 10, "bold"), bg="#ffffff", fg="#c0392b",
                            padx=10, pady=6)
         lf.pack(fill="x", pady=5, padx=2)
-        tk.Label(lf, text=f"지난주 진행: {_short(_strip_markers(row[0]), 100)}",
-                 font=(FONT_NAME, 9), bg="#ffffff", fg="#222",
-                 justify="left", anchor="w", wraplength=w - 90).pack(fill="x", pady=(0, 4))
+        # 지난주 진행 업무 — 전체 내용 표시
+        tk.Label(lf, text="지난주 진행 업무 (전체):", font=(FONT_NAME, 9, "bold"),
+                 bg="#ffffff", fg="#555", anchor="w").pack(fill="x")
+        tk.Label(lf, text=_strip_markers(row[0]), font=(FONT_NAME, 9),
+                 bg="#f7f9fb", fg="#222", justify="left", anchor="w",
+                 wraplength=w - 80).pack(fill="x", pady=(0, 6))
+        # 진행률 — 수정 가능
+        prow = tk.Frame(lf, bg="#ffffff"); prow.pack(fill="x")
+        tk.Label(prow, text="진행률:", font=(FONT_NAME, 9, "bold"),
+                 bg="#ffffff").pack(side="left")
+        pent = tk.Entry(prow, width=8, font=(FONT_NAME, 10), justify="center")
+        pent.insert(0, row[1] or "")
+        pent.pack(side="left", padx=6)
+        tk.Label(prow, text="← 다 끝났으면 100% 로 바꾸세요 (그러면 예정 안 써도 됨)",
+                 font=(FONT_NAME, 9), bg="#ffffff", fg="#888").pack(side="left")
+        # 금주 예정 — 직접 입력
         tk.Label(lf, text="금주 예정 업무 ↓ (직접 입력)", font=(FONT_NAME, 9, "bold"),
-                 bg="#ffffff", fg="#1f3b57", anchor="w").pack(fill="x")
-        txt = tk.Text(lf, height=2, font=(FONT_NAME, 10), wrap="word",
-                      relief="solid", bd=1)
+                 bg="#ffffff", fg="#1f3b57", anchor="w").pack(fill="x", pady=(6, 0))
+        txt = tk.Text(lf, height=2, font=(FONT_NAME, 10), wrap="word", relief="solid", bd=1)
         txt.pack(fill="x")
-        boxes.append((txt, row))
+        boxes.append((pent, txt, row))
 
     result = {"ok": None}
 
     def on_ok():
-        for txt, row in boxes:
+        for pent, txt, row in boxes:
+            pv = pent.get().strip()
+            if pv:
+                if re.fullmatch(r'\d+', pv):
+                    pv += '%'
+                row[1] = pv
             val = txt.get("1.0", "end").strip()
             if val:
                 row[2] = val
