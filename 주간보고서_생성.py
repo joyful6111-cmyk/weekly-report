@@ -600,8 +600,66 @@ def derive_report_date(paths):
 요일 = ['월', '화', '수', '목', '금', '토', '일']
 
 
-def build_workbook(all_tasks, merged_board, report_date):
-    """merged_board = [(label, content, status), ...]  (라벨별 1개로 통합·이름제거된 게시판)"""
+def merge_tasks(all_tasks):
+    """입력 업무들을 구분별 버킷으로 병합. 반환 (buckets, extra_order).
+       buckets[disp] = [[진행, 진행률, 예정], ...]  (예정 채우기 위해 리스트로)."""
+    all_items, extra_order = [], []
+    for tasks in all_tasks:
+        for t in tasks:
+            disp = 구분_매핑.get(t['분류'], t['분류'] or "기타업무")
+            if disp not in 구분_매핑.values() and disp not in extra_order:
+                extra_order.append(disp)
+            예정 = _dedup_plan(t['진행'], t['예정'])
+            all_items.append({'disp': disp, '진행': t['진행'], '진행률': t['진행률'], '예정': 예정})
+
+    merge_groups = {}
+    for i, it in enumerate(all_items):
+        k = _merge_key(_title(it['진행']))
+        if k:
+            merge_groups.setdefault(k, []).append(i)
+
+    buckets, seen_keys, used = {}, {}, set()
+    for i, it in enumerate(all_items):
+        if i in used:
+            continue
+        k = _merge_key(_title(it['진행']))
+        grp = merge_groups.get(k, [i]) if k else [i]
+        if len(grp) > 1:                       # 같은 제목/접두 여러 개 → 합치기
+            used.update(grp)
+            members = [all_items[j] for j in grp]
+            cats = [m['disp'] for m in members]
+            disp = max(set(cats), key=cats.count)
+            mr = _merge_group([(m['진행'], m['진행률'], m['예정']) for m in members])
+            row = [mr[0], mr[1], mr[2]]
+        else:
+            used.add(i)
+            disp = it['disp']
+            row = [it['진행'], it['진행률'], it['예정']]
+        key = re.sub(r'\s+', '', row[0] or '') + '||' + re.sub(r'\s+', '', row[2] or '')
+        s = seen_keys.setdefault(disp, set())
+        if key in s and key != '||':
+            continue
+        s.add(key)
+        buckets.setdefault(disp, []).append(row)
+    return buckets, extra_order
+
+
+def find_missing_plans(buckets):
+    """진행률 100% 미만인데 '금주 예정 업무'가 비어있는 업무를 찾는다.
+       반환: [{'disp','row'(리스트 참조)}, ...]"""
+    needs = []
+    for disp, rows in buckets.items():
+        for row in rows:
+            진행률 = (row[1] or '').strip()
+            예정 = (row[2] or '').strip()
+            m = re.match(r'(\d+)\s*%$', 진행률)
+            if m and int(m.group(1)) < 100 and not 예정:
+                needs.append({'disp': disp, 'row': row})
+    return needs
+
+
+def build_workbook(buckets, extra_order, merged_board, report_date):
+    """buckets/extra_order = merge_tasks() 결과, merged_board = 통합 게시판."""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "주간보고"
@@ -704,49 +762,7 @@ def build_workbook(all_tasks, merged_board, report_date):
     # 데일리 업무 (고정)
     write_block("데일리\n업무", [(데일리_지난주, 데일리_진행률, 데일리_금주)])
 
-    # 입력 3개 파일의 업무를 구분별로 병합 (담당자 구분 없음)
-    #  - 같은 '제목'의 업무는 1개로 합치고 세부내용을 결합 (일계표·세금계산서 등)
-    #  - 합쳐진 업무는 가장 많이 나온 구분에 배치
-    #  - 그 외 완전 동일 업무는 1개만 표시
-    all_items, extra_order = [], []
-    for tasks in all_tasks:
-        for t in tasks:
-            disp = 구분_매핑.get(t['분류'], t['분류'] or "기타업무")
-            if disp not in 구분_매핑.values() and disp not in extra_order:
-                extra_order.append(disp)
-            예정 = _dedup_plan(t['진행'], t['예정'])
-            all_items.append({'disp': disp, '진행': t['진행'], '진행률': t['진행률'], '예정': 예정})
-
-    # 묶음 키별 그룹핑 (같은 제목 또는 입찰/조달 접두)
-    merge_groups = {}
-    for i, it in enumerate(all_items):
-        k = _merge_key(_title(it['진행']))
-        if k:
-            merge_groups.setdefault(k, []).append(i)
-
-    buckets, seen_keys, used = {}, {}, set()
-    for i, it in enumerate(all_items):
-        if i in used:
-            continue
-        k = _merge_key(_title(it['진행']))
-        grp = merge_groups.get(k, [i]) if k else [i]
-        if len(grp) > 1:                       # 같은 제목 여러 개 → 합치기
-            used.update(grp)
-            members = [all_items[j] for j in grp]
-            cats = [m['disp'] for m in members]
-            disp = max(set(cats), key=cats.count)        # 가장 많은 구분
-            row = _merge_group([(m['진행'], m['진행률'], m['예정']) for m in members])
-        else:
-            used.add(i)
-            disp = it['disp']
-            row = (it['진행'], it['진행률'], it['예정'])
-        # 구분 내 완전 동일 중복 방지
-        key = re.sub(r'\s+', '', row[0] or '') + '||' + re.sub(r'\s+', '', row[2] or '')
-        s = seen_keys.setdefault(disp, set())
-        if key in s and key != '||':
-            continue
-        s.add(key)
-        buckets.setdefault(disp, []).append(row)
+    # buckets/extra_order 는 merge_tasks() 에서 미리 병합되어 전달됨
 
     # 통합 게시판에서 '세금계산서·분납서'를 재무업무 맨 위 고정 행으로 추출
     pinned_top = []
@@ -1161,6 +1177,79 @@ def resolve_daily_duplicates(parent, candidates):
     return result["drop"]
 
 
+def resolve_missing_plans(parent, needs):
+    """진행률 100% 미만인데 금주 예정이 빈 업무에 무엇을 넣을지 입력받음.
+       입력한 값은 해당 row[2]에 채움. 반환 True(진행)/None(취소)."""
+    dlg = tk.Toplevel(parent)
+    dlg.title("금주 예정 업무 입력")
+    dlg.configure(bg="#f4f6f8")
+    dlg.transient(parent); dlg.grab_set()
+    w, h = 860, 600
+    dlg.geometry(f"{w}x{h}+{parent.winfo_rootx()+30}+{parent.winfo_rooty()+15}")
+    dlg.attributes("-topmost", True)
+
+    tk.Label(dlg, text="금주 예정 업무 입력",
+             font=(FONT_NAME, 14, "bold"), bg="#f4f6f8", fg="#1f3b57").pack(pady=(12, 2))
+    tk.Label(dlg, text=f"진행률이 100% 미만인데 '금주 예정 업무'가 비어있는 업무가 {len(needs)}건 있습니다.\n"
+                       "무엇을 넣을지 입력하세요. (비워두면 그대로 빈칸으로 둡니다)",
+             font=(FONT_NAME, 10), bg="#f4f6f8", fg="#555", justify="center").pack(pady=(0, 8))
+
+    mid = tk.Frame(dlg, bg="#f4f6f8"); mid.pack(fill="both", expand=True, padx=12)
+    canvas = tk.Canvas(mid, bg="#f4f6f8", highlightthickness=0)
+    sb = ttk.Scrollbar(mid, orient="vertical", command=canvas.yview)
+    inner = tk.Frame(canvas, bg="#f4f6f8")
+    inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.create_window((0, 0), window=inner, anchor="nw", width=w - 40)
+    canvas.configure(yscrollcommand=sb.set)
+    canvas.pack(side="left", fill="both", expand=True); sb.pack(side="right", fill="y")
+    canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
+
+    boxes = []
+    for n in needs:
+        row = n['row']
+        title = _strip_markers(row[0]).split('\n')[0]
+        lf = tk.LabelFrame(inner, text=f"  [{n['disp']}]  진행률 {row[1]}  ",
+                           font=(FONT_NAME, 10, "bold"), bg="#ffffff", fg="#c0392b",
+                           padx=10, pady=6)
+        lf.pack(fill="x", pady=5, padx=2)
+        tk.Label(lf, text=f"지난주 진행: {_short(_strip_markers(row[0]), 100)}",
+                 font=(FONT_NAME, 9), bg="#ffffff", fg="#222",
+                 justify="left", anchor="w", wraplength=w - 90).pack(fill="x", pady=(0, 4))
+        tk.Label(lf, text="금주 예정 업무 ↓ (직접 입력)", font=(FONT_NAME, 9, "bold"),
+                 bg="#ffffff", fg="#1f3b57", anchor="w").pack(fill="x")
+        txt = tk.Text(lf, height=2, font=(FONT_NAME, 10), wrap="word",
+                      relief="solid", bd=1)
+        txt.pack(fill="x")
+        boxes.append((txt, row))
+
+    result = {"ok": None}
+
+    def on_ok():
+        for txt, row in boxes:
+            val = txt.get("1.0", "end").strip()
+            if val:
+                row[2] = val
+        result["ok"] = True
+        canvas.unbind_all("<MouseWheel>"); dlg.destroy()
+
+    def on_cancel():
+        result["ok"] = None
+        canvas.unbind_all("<MouseWheel>"); dlg.destroy()
+
+    btns = tk.Frame(dlg, bg="#f4f6f8"); btns.pack(fill="x", padx=12, pady=10)
+    tk.Button(btns, text="✓ 입력한 대로 진행", font=(FONT_NAME, 11, "bold"),
+              bg="#1f9d55", fg="white", relief="flat", padx=14, pady=6,
+              command=on_ok).pack(side="right")
+    tk.Button(btns, text="모두 비워두고 진행", font=(FONT_NAME, 10), relief="groove",
+              padx=12, pady=6, command=on_ok).pack(side="right", padx=8)
+    tk.Button(btns, text="취소", font=(FONT_NAME, 10), relief="groove",
+              padx=12, pady=6, command=on_cancel).pack(side="left")
+
+    dlg.protocol("WM_DELETE_WINDOW", on_cancel)
+    parent.wait_window(dlg)
+    return result["ok"]
+
+
 def resolve_board(parent, all_boards, filenames):
     """게시판 항목을 라벨별로 1개로 통합. 파일마다 내용이 다르면 팝업으로 선택.
        반환: [(label, content, status), ...]  또는 None(취소)."""
@@ -1518,9 +1607,21 @@ class ReportApp:
             self.set_status("취소되었습니다.")
             return
 
+        # 업무 병합(같은 제목/입찰·조달) → 구분별 버킷
+        buckets, extra_order = merge_tasks(all_tasks)
+
+        # 진행률 100% 미만인데 금주 예정이 빈 업무 → 무엇을 넣을지 입력
+        needs = find_missing_plans(buckets)
+        if needs:
+            self.set_status("금주 예정 업무 확인 중...")
+            ok = resolve_missing_plans(self.root, needs)
+            if ok is None:
+                self.set_status("취소되었습니다.")
+                return
+
         # 생성/저장
         self.set_status("보고서를 만드는 중...")
-        wb = build_workbook(all_tasks, merged_board, report_date)
+        wb = build_workbook(buckets, extra_order, merged_board, report_date)
         outdir = os.path.dirname(self.paths[0])
         outname = f"{부서명}_주간보고_{report_date.strftime('%Y%m%d')}.xlsx"
         outpath = os.path.join(outdir, outname)
