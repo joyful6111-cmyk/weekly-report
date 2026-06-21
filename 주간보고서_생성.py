@@ -280,6 +280,45 @@ def _arrange(items):
     return _cluster(groups[0]) + _cluster(groups[1]) + _cluster(groups[2])
 
 
+def _title(text):
+    """업무의 '제목'(첫 줄 핵심)을 비교용으로 정규화.
+       머리표·괄호·끝의 '완료/진행중' 제거. 같은 제목끼리 합치기 위함."""
+    first = _strip_markers(text or '').split('\n')[0]
+    first = re.sub(r'^[·\-\s]+', '', first)
+    first = re.sub(r'\([^)]*\)', '', first)              # (100%), (진행중) 등
+    first = re.sub(r'(완료|진행중)\s*$', '', first.strip())  # 끝의 완료/진행중
+    return re.sub(r'\s+', '', first)
+
+
+def _title_mergeable(title):
+    """제목이 합치기 대상인지 — 대괄호 마커만 있는([상시] 등) 짧은 건 제외."""
+    core = re.sub(r'\[[^\]]*\]', '', title)   # [상시] 같은 마커 제거 후 길이 확인
+    return len(core) >= 4 or len(title) >= 8
+
+
+def _merge_group(members):
+    """같은 제목 업무들을 1개로 합침. members=[(진행,진행률,예정),...].
+       제목은 가장 짧은(깔끔한) 첫 줄, 세부 줄은 모두 모아 중복 제거."""
+    firsts = [(m[0] or '').split('\n')[0] for m in members]
+    title_line = min(firsts, key=len) if firsts else ''
+    detail, seen = [], set()
+    for 진행, _, _ in members:
+        for ln in (진행 or '').split('\n')[1:]:
+            k = re.sub(r'\s+', '', ln)
+            if k and k not in seen:
+                seen.add(k); detail.append(ln)
+    진행 = title_line + ('\n' + '\n'.join(detail) if detail else '')
+    progs = [m[1] for m in members if (m[1] or '').strip()]
+    진행률 = progs[0] if progs else ''
+    plans, ps = [], set()
+    for _, _, 예정 in members:
+        for ln in (예정 or '').split('\n'):
+            k = re.sub(r'\s+', '', ln)
+            if k and k not in ps:
+                ps.add(k); plans.append(ln)
+    return (진행, 진행률, '\n'.join(plans))
+
+
 def _dedup_plan(진행, 예정):
     """'금주 예정'이 '지난주 진행'과 사실상 동일(앱 자동 복제)이면 비운다.
        내용 손실 없음 — 같은 내용이 진행 칸에 그대로 남아 있음."""
@@ -649,23 +688,48 @@ def build_workbook(all_tasks, merged_board, report_date):
     write_block("데일리\n업무", [(데일리_지난주, 데일리_진행률, 데일리_금주)])
 
     # 입력 3개 파일의 업무를 구분별로 병합 (담당자 구분 없음)
-    #  - 파일 입력 순서를 유지하여 누락 없이 모두 수록
-    #  - 단, 여러 사람 파일에 똑같이 들어있는 '완전히 동일한 업무'는 1개만 표시
-    buckets = {}      # 표시구분 -> [(지난주, 진행률, 금주), ...]
-    seen_keys = {}    # 표시구분 -> set(중복 판별 키)
-    extra_order = []  # 매핑에 없는 신규 구분
+    #  - 같은 '제목'의 업무는 1개로 합치고 세부내용을 결합 (일계표·세금계산서 등)
+    #  - 합쳐진 업무는 가장 많이 나온 구분에 배치
+    #  - 그 외 완전 동일 업무는 1개만 표시
+    all_items, extra_order = [], []
     for tasks in all_tasks:
         for t in tasks:
             disp = 구분_매핑.get(t['분류'], t['분류'] or "기타업무")
             if disp not in 구분_매핑.values() and disp not in extra_order:
                 extra_order.append(disp)
             예정 = _dedup_plan(t['진행'], t['예정'])
-            key = re.sub(r'\s+', '', t['진행'] or '') + '||' + re.sub(r'\s+', '', 예정 or '')
-            s = seen_keys.setdefault(disp, set())
-            if key in s and key != '||':      # 내용이 완전히 같은 업무면 건너뜀
-                continue
-            s.add(key)
-            buckets.setdefault(disp, []).append((t['진행'], t['진행률'], 예정))
+            all_items.append({'disp': disp, '진행': t['진행'], '진행률': t['진행률'], '예정': 예정})
+
+    # 제목별 그룹핑 (합치기 대상만)
+    title_groups = {}
+    for i, it in enumerate(all_items):
+        ti = _title(it['진행'])
+        if ti and _title_mergeable(ti):
+            title_groups.setdefault(ti, []).append(i)
+
+    buckets, seen_keys, used = {}, {}, set()
+    for i, it in enumerate(all_items):
+        if i in used:
+            continue
+        ti = _title(it['진행'])
+        grp = title_groups.get(ti, [i]) if (ti and _title_mergeable(ti)) else [i]
+        if len(grp) > 1:                       # 같은 제목 여러 개 → 합치기
+            used.update(grp)
+            members = [all_items[j] for j in grp]
+            cats = [m['disp'] for m in members]
+            disp = max(set(cats), key=cats.count)        # 가장 많은 구분
+            row = _merge_group([(m['진행'], m['진행률'], m['예정']) for m in members])
+        else:
+            used.add(i)
+            disp = it['disp']
+            row = (it['진행'], it['진행률'], it['예정'])
+        # 구분 내 완전 동일 중복 방지
+        key = re.sub(r'\s+', '', row[0] or '') + '||' + re.sub(r'\s+', '', row[2] or '')
+        s = seen_keys.setdefault(disp, set())
+        if key in s and key != '||':
+            continue
+        s.add(key)
+        buckets.setdefault(disp, []).append(row)
 
     # 통합 게시판에서 '세금계산서·분납서'를 재무업무 맨 위 고정 행으로 추출
     pinned_top = []
