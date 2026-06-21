@@ -115,6 +115,10 @@ except ImportError:
     "조달관련그룹웨어공지",   # 조달 관련 그룹웨어 공지
 ]
 
+# 이 단어로 '시작'하는 업무들은 각각 하나로 합침 (입찰끼리, 조달끼리).
+#  제목이 짧거나(입찰) 조금씩 달라도(조달 관련 / 조달 관련 업무) 한 묶음으로.
+합치기_접두 = ["입찰", "조달"]
+
 # AI 요약(Claude API) 설정
 #  - 키마다 지원 모델이 달라, 앞에서부터 차례로 시도해 되는 모델을 사용
 AI_MODELS = [
@@ -294,6 +298,19 @@ def _title_mergeable(title):
     """제목이 합치기 대상인지 — 대괄호 마커만 있는([상시] 등) 짧은 건 제외."""
     core = re.sub(r'\[[^\]]*\]', '', title)   # [상시] 같은 마커 제거 후 길이 확인
     return len(core) >= 4 or len(title) >= 8
+
+
+def _merge_key(title):
+    """업무를 어떤 묶음으로 합칠지 키 결정.
+       - 합치기_접두로 시작하면 그 접두 묶음(입찰끼리/조달끼리)
+       - 아니면 같은 제목 묶음 (합치기 대상일 때만)"""
+    if not title:
+        return None
+    for p in 합치기_접두:
+        pn = re.sub(r'\s+', '', p)
+        if pn and title.startswith(pn):
+            return 'P:' + pn
+    return 'T:' + title if _title_mergeable(title) else None
 
 
 def _merge_group(members):
@@ -700,19 +717,19 @@ def build_workbook(all_tasks, merged_board, report_date):
             예정 = _dedup_plan(t['진행'], t['예정'])
             all_items.append({'disp': disp, '진행': t['진행'], '진행률': t['진행률'], '예정': 예정})
 
-    # 제목별 그룹핑 (합치기 대상만)
-    title_groups = {}
+    # 묶음 키별 그룹핑 (같은 제목 또는 입찰/조달 접두)
+    merge_groups = {}
     for i, it in enumerate(all_items):
-        ti = _title(it['진행'])
-        if ti and _title_mergeable(ti):
-            title_groups.setdefault(ti, []).append(i)
+        k = _merge_key(_title(it['진행']))
+        if k:
+            merge_groups.setdefault(k, []).append(i)
 
     buckets, seen_keys, used = {}, {}, set()
     for i, it in enumerate(all_items):
         if i in used:
             continue
-        ti = _title(it['진행'])
-        grp = title_groups.get(ti, [i]) if (ti and _title_mergeable(ti)) else [i]
+        k = _merge_key(_title(it['진행']))
+        grp = merge_groups.get(k, [i]) if k else [i]
         if len(grp) > 1:                       # 같은 제목 여러 개 → 합치기
             used.update(grp)
             members = [all_items[j] for j in grp]
