@@ -336,16 +336,19 @@ def _merge_group(members):
     return (진행, 진행률, '\n'.join(plans))
 
 
-def _dedup_plan(진행, 예정):
-    """'금주 예정'이 '지난주 진행'과 사실상 동일(앱 자동 복제)이면 비운다.
-       내용 손실 없음 — 같은 내용이 진행 칸에 그대로 남아 있음."""
-    a = re.sub(r'\s+', '', 진행 or '')
+def _dedup_plan(진행, 예정, 진행률=''):
+    """'금주 예정'이 '지난주 진행'과 동일(앱 자동 복제)이면 비운다.
+       단, 100% 완료된 업무만 — 진행중(<100%) 업무의 예정은 '다음 계획'이라 유지!
+       (진행중인데 예정을 지우면 누락처럼 보여 재입력 → 업무 누락 발생)"""
     b = re.sub(r'\s+', '', 예정 or '')
     if not b:
         return ""
+    done = re.fullmatch(r'100\s*%?', (진행률 or '').strip()) is not None
+    if not done:
+        return 예정                       # 진행중이면 예정 그대로 유지
+    a = re.sub(r'\s+', '', 진행 or '')
     if b == a:
         return ""
-    # 한쪽이 다른 쪽의 앞부분(잘린 복제)인 긴 텍스트도 중복으로 간주
     if len(b) >= 15 and (a.startswith(b) or b.startswith(a)):
         return ""
     return 예정
@@ -609,7 +612,7 @@ def merge_tasks(all_tasks):
             disp = 구분_매핑.get(t['분류'], t['분류'] or "기타업무")
             if disp not in 구분_매핑.values() and disp not in extra_order:
                 extra_order.append(disp)
-            예정 = _dedup_plan(t['진행'], t['예정'])
+            예정 = _dedup_plan(t['진행'], t['예정'], t['진행률'])
             all_items.append({'disp': disp, '진행': t['진행'], '진행률': t['진행률'], '예정': 예정})
 
     merge_groups = {}
