@@ -196,8 +196,9 @@ def _pad(s):
 
 
 def _is_placeholder(s):
-    """ㅇㅇㅇ, ㅇㅇㅇㅇ, ---, ... 같은 의미 없는 placeholder 인지 판별."""
-    return re.sub(r'[ㅇoO0○●\s\-·.…]', '', s or '') == ''
+    """ㅇㅇㅇ, ---, (내용 없음) 같은 의미 없는 placeholder 인지 판별."""
+    t = re.sub(r'[ㅇoO0○●\s\-·.…()\[\]]', '', s or '')
+    return t == '' or t == '내용없음'
 
 
 def _strip_names(s):
@@ -824,10 +825,25 @@ def build_workbook(buckets, extra_order, merged_board, report_date):
 
     # 통합 게시판에서 '세금계산서·분납서'를 재무업무 맨 위 고정 행으로 추출
     pinned_top = []
+    pin_contents = []   # (키워드, 내용) — 본문 중복 제거 비교용
     for label, content, status in merged_board:
         if any(k in label for k in 재무_고정_게시판):
             txt = f"{label} : {content}" if content.strip() else label
             pinned_top.append((txt, status, ""))
+            for k in 재무_고정_게시판:
+                if k in label:
+                    pin_contents.append((k, content))
+
+    # 게시판 맨위 고정(세금계산서/분납서)과 겹치는 본문 업무는 제거 (중복 방지)
+    for disp in list(buckets.keys()):
+        kept = []
+        for row in buckets[disp]:
+            text = row[0] or ''
+            dup = any(k in text and _similarity(text, pc) >= 0.45
+                      for k, pc in pin_contents)
+            if not dup:
+                kept.append(row)
+        buckets[disp] = kept
 
     def _pin_index(text):
         n = re.sub(r'\s+', '', text or '')
