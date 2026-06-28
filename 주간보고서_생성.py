@@ -16,6 +16,7 @@
 
 import os
 import re
+import io
 import sys
 import json
 import html
@@ -41,6 +42,11 @@ except ImportError:
     tk.Tk().withdraw()
     messagebox.showerror("오류", "openpyxl 라이브러리가 필요합니다.\n명령창에서  pip install openpyxl  실행 후 다시 시도하세요.")
     sys.exit(1)
+
+try:    # 이미지 삽입용 (Pillow 필요). 없으면 이미지 없이 동작.
+    from openpyxl.drawing.image import Image as XLImage
+except Exception:
+    XLImage = None
 
 
 # ===================================================================
@@ -227,7 +233,7 @@ def _strip_markers(s):
 
 def _task_rank(item):
     """구분 내 정렬 순서: [루틴]=0(위) → 일반=1 → [신규]=2(아래로 몰기)."""
-    진행, 진행률, 예정 = item
+    진행, 진행률, 예정 = item[0], item[1], item[2]
     진행 = 진행 or ""
     예정 = 예정 or ""
     if "[루틴]" in 진행:
@@ -314,13 +320,13 @@ def _merge_key(title):
 
 
 def _merge_group(members):
-    """같은 제목 업무들을 1개로 합침. members=[(진행,진행률,예정),...].
-       제목은 가장 짧은(깔끔한) 첫 줄, 세부 줄은 모두 모아 중복 제거."""
+    """같은 제목 업무들을 1개로 합침. members=[[진행,진행률,예정,이미지],...].
+       제목은 가장 짧은(깔끔한) 첫 줄, 세부 줄은 모두 모아 중복 제거. 이미지도 합침."""
     firsts = [(m[0] or '').split('\n')[0] for m in members]
     title_line = min(firsts, key=len) if firsts else ''
     detail, seen = [], set()
-    for 진행, _, _ in members:
-        for ln in (진행 or '').split('\n')[1:]:
+    for m in members:
+        for ln in (m[0] or '').split('\n')[1:]:
             k = re.sub(r'\s+', '', ln)
             if k and k not in seen:
                 seen.add(k); detail.append(ln)
@@ -328,12 +334,16 @@ def _merge_group(members):
     progs = [m[1] for m in members if (m[1] or '').strip()]
     진행률 = progs[0] if progs else ''
     plans, ps = [], set()
-    for _, _, 예정 in members:
-        for ln in (예정 or '').split('\n'):
+    for m in members:
+        for ln in (m[2] or '').split('\n'):
             k = re.sub(r'\s+', '', ln)
             if k and k not in ps:
                 ps.add(k); plans.append(ln)
-    return (진행, 진행률, '\n'.join(plans))
+    imgs = []
+    for m in members:
+        if len(m) > 3 and m[3]:
+            imgs.extend(m[3])
+    return [진행, 진행률, '\n'.join(plans), imgs]
 
 
 def _dedup_plan(진행, 예정, 진행률=''):
@@ -460,6 +470,7 @@ def _parse_xlsx(path):
     starts.append(maxr + 1)  # 보초값
 
     tasks, board, in_board = [], [], False
+    task_ranges = []   # (task_dict, r0, r1) — 이미지 매핑용
     for i in range(len(starts) - 1):
         r0, r1 = starts[i], starts[i + 1] - 1
         a = str(ws.cell(r0, 1).value).strip()
@@ -492,12 +503,33 @@ def _parse_xlsx(path):
                 prog = _fmt_progress(ws.cell(r, 3).value)
                 break
 
-        tasks.append({
+        td = {
             '분류': a,
             '진행': "\n".join(b_lines),
             '진행률': prog,
             '예정': "\n".join(d_lines),
-        })
+            '이미지': [],
+        }
+        tasks.append(td)
+        task_ranges.append((td, r0, r1))
+
+    # 엑셀에 박힌 이미지를 앵커 위치(행)로 해당 업무에 매핑
+    for im in getattr(ws, '_images', []):
+        try:
+            arow = im.anchor._from.row + 1
+            try:
+                data = im.ref.getvalue()
+            except Exception:
+                im.ref.seek(0); data = im.ref.read()
+            w, h = int(im.width), int(im.height)
+        except Exception:
+            continue
+        if not data:
+            continue
+        for td, r0, r1 in task_ranges:
+            if r0 <= arow <= r1:
+                td['이미지'].append({'data': data, 'w': w, 'h': h})
+                break
 
     return tasks, board
 
@@ -613,7 +645,8 @@ def merge_tasks(all_tasks):
             if disp not in 구분_매핑.values() and disp not in extra_order:
                 extra_order.append(disp)
             예정 = _dedup_plan(t['진행'], t['예정'], t['진행률'])
-            all_items.append({'disp': disp, '진행': t['진행'], '진행률': t['진행률'], '예정': 예정})
+            all_items.append({'disp': disp, '진행': t['진행'], '진행률': t['진행률'],
+                              '예정': 예정, '이미지': t.get('이미지', [])})
 
     merge_groups = {}
     for i, it in enumerate(all_items):
@@ -632,12 +665,11 @@ def merge_tasks(all_tasks):
             members = [all_items[j] for j in grp]
             cats = [m['disp'] for m in members]
             disp = max(set(cats), key=cats.count)
-            mr = _merge_group([(m['진행'], m['진행률'], m['예정']) for m in members])
-            row = [mr[0], mr[1], mr[2]]
+            row = _merge_group([[m['진행'], m['진행률'], m['예정'], m['이미지']] for m in members])
         else:
             used.add(i)
             disp = it['disp']
-            row = [it['진행'], it['진행률'], it['예정']]
+            row = [it['진행'], it['진행률'], it['예정'], it['이미지']]
         key = re.sub(r'\s+', '', row[0] or '') + '||' + re.sub(r'\s+', '', row[2] or '')
         s = seen_keys.setdefault(disp, set())
         if key in s and key != '||':
@@ -741,20 +773,43 @@ def build_workbook(buckets, extra_order, merged_board, report_date):
     style_row(R, fill=FILL_HEADER)
     R += 1
 
+    def add_image_row(img):
+        """업무 아래에 이미지 한 줄 추가 (B열, 폭에 맞춰 축소)."""
+        nonlocal R
+        if XLImage is None or not img.get('data'):
+            return
+        try:
+            xi = XLImage(io.BytesIO(img['data']))
+            maxw = 430
+            w0 = img.get('w') or xi.width or maxw
+            h0 = img.get('h') or xi.height or 300
+            ratio = min(maxw / w0, 1.0)
+            xi.width = int(w0 * ratio)
+            xi.height = int(h0 * ratio)
+            ws.add_image(xi, f"B{R}")
+            ws.row_dimensions[R].height = max(xi.height * 0.75 + 4, 20)
+            style_row(R)
+            R += 1
+        except Exception:
+            pass
+
     def write_block(label, items):
-        """label = 구분명, items = [(지난주, 진행률, 금주), ...]  세로 병합 처리"""
+        """label = 구분명, items = [[지난주, 진행률, 금주, 이미지?], ...]  세로 병합 처리"""
         nonlocal R
         if not items:
             return
         start = R
-        for 지난주, 진행률, 금주 in items:
-            지난주 = _strip_markers(지난주)   # [루틴]/[프로젝트] 표시 제거
-            금주 = _strip_markers(금주)
-            ws.cell(R, 2, _pad(지난주)).font = f(10); ws.cell(R, 2).alignment = LEFT
+        for item in items:
+            지난주, 진행률, 금주 = item[0], item[1], item[2]
+            images = item[3] if len(item) > 3 else None
+            ws.cell(R, 2, _pad(_strip_markers(지난주))).font = f(10); ws.cell(R, 2).alignment = LEFT
             ws.cell(R, 3, 진행률).font = f(10, bold=True); ws.cell(R, 3).alignment = CENTER
-            ws.cell(R, 4, _pad(금주)).font = f(10); ws.cell(R, 4).alignment = LEFT
+            ws.cell(R, 4, _pad(_strip_markers(금주))).font = f(10); ws.cell(R, 4).alignment = LEFT
             style_row(R)
             R += 1
+            if images:
+                for img in images:
+                    add_image_row(img)
         ws.merge_cells(start_row=start, start_column=1, end_row=R - 1, end_column=1)
         lc = ws.cell(start, 1, label)
         lc.font = f(11, bold=True); lc.alignment = CENTER; lc.fill = FILL_HEADER
